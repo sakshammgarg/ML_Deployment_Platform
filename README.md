@@ -49,10 +49,27 @@ This project builds a complete ML Deployment Platform using a FastAPI backend, a
 * GET `/api/v1/metrics/{model_id}` aggregates per-version stats in a single SQL `GROUP BY` query — no Python-side row iteration
 * Tracks: `total_requests`, `avg/min/max latency_ms`, `error_count`, `error_rate`, `accuracy`, and `last_request_time`
 * Accuracy computed entirely in PostgreSQL: `CAST(response_payload->>'prediction' AS INT) = actual_label`
-* Optional `since` datetime parameter for time-windowed metric views
 * AB comparison summary automatically identifies the version with lowest latency, lowest error rate, and highest accuracy when an A/B test is active
 
-### 7. Frontend Dashboard
+### 7. Bridge Router
+
+* Adapter layer (`bridge_router.py`) registered before all other routers in `main.py` so its paths take priority over generic catch-alls
+* Translates the frontend's API contract to backend services without modifying any existing route or schema
+* Exposes frontend-compatible shapes for every resource: enriched deployment objects (with `traffic_percentage` derived from the active A/B config), AB test objects (with `model_a_traffic` / `model_b_traffic` computed from the `traffic_split`), and `MetricsSnapshot` objects with `latency_p50/p95/p99` and `throughput` fields
+* `GET /metrics/summary` — dashboard overview: total models, active deployments, running A/B tests, average accuracy, average latency, and a recent-events feed
+* `GET /metrics/?hours=N` and `GET /metrics/model/{model_id}?hours=N` — time-windowed metrics snapshots; `hours` converts to a `since` datetime passed to the SQL aggregation layer
+* `POST /predict` — body-based inference accepting `{ model_id, features }`; enriches the response with a human-readable `prediction_label` resolved from the model's `classes_` attribute
+* `POST /models/{model_id}/activate` / `deactivate` — convenience shortcuts to activate the latest version of a model or deactivate all versions
+* Framework name normalization: maps `"scikit-learn"` / `"scikit_learn"` → `"sklearn"` at model-creation time
+
+### 8. Prediction Log
+
+* `GET /api/v1/predictions/` — paginated list of all logged inference calls, filterable by `version_id`
+* `GET /api/v1/predictions/{prediction_id}` — retrieve a single prediction record with full request/response payload
+* `DELETE /api/v1/predictions/{prediction_id}` — remove a prediction record from the audit log
+* Records stored include: `request_payload`, `response_payload`, `latency_ms`, `status_code`, `error_message`, `client_id`, `ab_config_id`, and optional `actual_label` for post-hoc accuracy tracking
+
+### 9. Frontend Dashboard
 
 * Next.js 14 + Tailwind CSS + Recharts dashboard served on port `3000`
 * Pages: Models, Model Detail, Deployments, A/B Testing, Metrics, Predict
@@ -111,8 +128,8 @@ pip install fastapi uvicorn sqlalchemy psycopg2-binary pydantic python-dotenv al
 1. **Clone the repository**
 
 ```bash
-git clone https://github.com/sakshammgarg/Self-Optimizing-ML-Deployment-Platform.git
-cd Self-Optimizing-ML-Deployment-Platform
+git clone https://github.com/sakshammgarg/ML_Deployment_Platform.git
+cd ML_Deployment_Platform
 ```
 
 2. **Configure environment**
@@ -148,13 +165,13 @@ curl http://localhost:8000/health
 Run the platform to execute the full ML operations workflow:
 
 1. **Register a model** — POST `/api/v1/models` with `name`, `framework`, and `owner`
-2. **Upload a version** — POST `/api/v1/versions/upload/{model_id}` with a `.pkl` artifact and `version_tag`
+2. **Upload a version** — POST `/api/v1/models/{model_id}/versions` with a `.pkl` artifact and `version_tag`
 3. **Activate a version** — PATCH `/api/v1/versions/{version_id}/activate`
 4. **Run inference** — POST `/api/v1/predict/{model_id}` with feature payload
 5. **View metrics** — GET `/api/v1/metrics/{model_id}` for live latency and accuracy stats
 6. **Create an A/B test** — POST `/api/v1/ab-configs` with `traffic_split` across two version IDs
 7. **Monitor results** — GET `/api/v1/metrics/{model_id}` returns AB comparison summary automatically
-8. **Rollback** — PATCH `/api/v1/versions/{version_id}/rollback` to revert to any prior version
+8. **Rollback** — POST `/api/v1/versions/{version_id}/rollback` to revert to any prior version
 9. **Browse the dashboard** — open `http://localhost:3000` for the full Next.js UI
 
 ## Platform Component Guide
@@ -164,7 +181,7 @@ Run the platform to execute the full ML operations workflow:
 | Production inference | Activate a version → POST `/predict/{model_id}` |
 | Comparing two model versions | Create an A/B config with desired traffic split |
 | Reverting a bad deployment | Use rollback endpoint — atomic, no downtime |
-| Monitoring latency regressions | GET `/metrics/{model_id}?since=<ISO datetime>` |
+| Monitoring latency regressions | GET `/metrics/model/{model_id}?hours=24` (bridge route) |
 | Uploading a retrained model | Upload new version; old version stays active until you switch |
 
 ## Advanced Features
@@ -176,7 +193,7 @@ This implementation includes:
 * **Corrupt artifact rejection** — pkl files are `joblib.load`-tested at upload time; bad files are deleted and the request fails before any DB record is created
 * **Benchmark accuracy on upload** — compatible sklearn classifiers are automatically evaluated against the Iris dataset and the score is stored in the version's `metrics` field
 * **Confidence extraction** — `predict_proba` is called after every prediction when available; the max class probability is returned as `confidence` alongside the raw prediction
-* **Time-windowed metrics** — pass `since` to the metrics endpoint to scope aggregation to a recent window (e.g., last hour)
+* **Time-windowed metrics** — the bridge metrics routes (`GET /metrics/?hours=N`, `GET /metrics/model/{model_id}?hours=N`) convert the integer `hours` parameter to a `since` datetime and pass it into the SQL aggregation layer, scoping all stats to that window
 * **AB comparison auto-summary** — the metrics endpoint automatically names the winning version by latency, error rate, and accuracy when an A/B test is running
 * **Persistent volume mounts** — `postgres_data` and `models_storage` volumes survive container restarts
 
