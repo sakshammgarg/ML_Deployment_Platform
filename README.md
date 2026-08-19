@@ -1,4 +1,4 @@
-# Self-Optimizing ML Deployment Platform 
+# Self-Optimizing ML Deployment Platform  
 
 This project delivers a production-ready, full-stack platform for registering, versioning, deploying, and live-monitoring machine learning models through a unified API and dashboard, with built-in A/B testing and automated performance tracking.
 
